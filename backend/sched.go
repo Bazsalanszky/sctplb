@@ -64,9 +64,9 @@ var connectWg sync.WaitGroup
 
 // DispatchAddServer keeps the backend pool in step with the configured
 // services: every discoveryInterval, each service's name is resolved once and
-// a backend is added for every address (see backendAddresses) that is not one
-// yet. There can be more than one message outstanding towards the same
-// backend. It returns once ctx is done.
+// a backend is added for every address (see backendAddresses and preferIPv6)
+// that is not one yet. There can be more than one message outstanding towards
+// the same backend. It returns once ctx is done.
 func (b BackendSvc) DispatchAddServer(ctx stdctx.Context) {
 	for {
 		b.discoverAll(ctx)
@@ -98,7 +98,7 @@ func (b BackendSvc) discoverService(ctx stdctx.Context, uri string) {
 		return
 	}
 	sctplbCtx := context.Sctplb_Self()
-	for _, address := range backendAddresses(ips) {
+	for _, address := range backendAddresses(ips, preferIPv6()) {
 		logger.DiscoveryLog.Debugf("discover service %s, ip %s", uri, address)
 
 		sctplbCtx.Lock()
@@ -124,13 +124,14 @@ func (b BackendSvc) discoverService(ctx stdctx.Context, uri string) {
 }
 
 // backendAddresses picks the backend addresses from one lookup of a service.
-// IPv4 is preferred: if the lookup returned any IPv4 address, only the IPv4
-// addresses are used, as before, so a dual-stack service (which resolves to an
-// A and an AAAA record per AMF instance) still yields one backend per instance
-// rather than one per address family. Otherwise the IPv6 addresses are used,
-// so discovery also works on IPv6-only clusters. Each address is in its
+// One address family is used, so a dual-stack service (which resolves to an A
+// and an AAAA record per AMF instance) still yields one backend per instance
+// rather than one per address family. IPv4 is preferred, as before, unless
+// preferV6 is set: then the IPv6 addresses are used if there are any. Either
+// way the other family is used if the lookup returned only that one, so
+// discovery also works on single-stack clusters. Each address is in its
 // canonical text form, which is what hasBackend compares.
-func backendAddresses(ips []net.IPAddr) []string {
+func backendAddresses(ips []net.IPAddr, preferV6 bool) []string {
 	var ipv4, ipv6 []string
 	for _, ipAddr := range ips {
 		if v4 := ipAddr.IP.To4(); v4 != nil {
@@ -139,7 +140,7 @@ func backendAddresses(ips []net.IPAddr) []string {
 			ipv6 = append(ipv6, ipAddr.IP.String())
 		}
 	}
-	if len(ipv4) > 0 {
+	if len(ipv4) > 0 && (!preferV6 || len(ipv6) == 0) {
 		return ipv4
 	}
 	return ipv6

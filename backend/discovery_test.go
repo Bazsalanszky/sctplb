@@ -29,12 +29,15 @@ type fakeDiscovery struct {
 	started []string
 	names   []string
 	lookups int
+	// preferIPv6 is what preferIPv6 returns during the test.
+	preferIPv6 bool
 }
 
 func useFakeDiscovery(t *testing.T, f *fakeDiscovery) {
 	t.Helper()
 	context.Sctplb_Self().Reset()
-	oldLookup, oldStart := lookupIPAddr, startBackend
+	oldLookup, oldStart, oldPrefer := lookupIPAddr, startBackend, preferIPv6
+	preferIPv6 = func() bool { return f.preferIPv6 }
 	lookupIPAddr = func(_ stdctx.Context, name string) ([]net.IPAddr, error) {
 		f.lookups++
 		f.names = append(f.names, name)
@@ -44,7 +47,7 @@ func useFakeDiscovery(t *testing.T, f *fakeDiscovery) {
 		f.started = append(f.started, backend.(*GrpcServer).address)
 	}
 	t.Cleanup(func() {
-		lookupIPAddr, startBackend = oldLookup, oldStart
+		lookupIPAddr, startBackend, preferIPv6 = oldLookup, oldStart, oldPrefer
 		context.Sctplb_Self().Reset()
 	})
 }
@@ -200,7 +203,7 @@ func TestBackendAddresses(t *testing.T) {
 		{name: "nothing resolved"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := backendAddresses(tc.ips); !slices.Equal(got, tc.want) {
+			if got := backendAddresses(tc.ips, false); !slices.Equal(got, tc.want) {
 				t.Errorf("backendAddresses(%v) = %v, want %v", tc.ips, got, tc.want)
 			}
 		})
