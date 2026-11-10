@@ -123,44 +123,12 @@ func (b *GrpcServer) readFromServer() {
 			deleteBackendNF(b)
 			return
 		} else {
-			if response.Msgtype == gClient.MsgType_INIT_MSG {
+			switch response.Msgtype {
+			case gClient.MsgType_INIT_MSG:
 				logger.GrpcLog.Infof("init Response from Server %s server: %s", response.AmfId, response.VerboseMsg)
-			} else if response.Msgtype == gClient.MsgType_REDIRECT_MSG {
-				sctplbSelf := sctplbCtx.Sctplb_Self()
-				sctplbSelf.Lock()
-				backends := make([]sctplbCtx.NF, len(sctplbSelf.Backends))
-				copy(backends, sctplbSelf.Backends)
-				sctplbSelf.Unlock()
-
-				var found bool
-				for _, instance := range backends {
-					b1 := instance.(*GrpcServer)
-					if b1.address == response.RedirectId {
-						if !b1.state.Load() {
-							logger.GrpcLog.Infoln("backend state is not in READY state, so not forwarding redirected Msg")
-						} else {
-							t := gClient.SctplbMessage{}
-							t.VerboseMsg = "Hello From gNB Message !"
-							t.Msgtype = gClient.MsgType_GNB_MSG
-							t.SctplbId = os.Getenv("HOSTNAME")
-							t.Msg = response.Msg
-							t.GnbId = response.GnbId
-							b1.sendMu.Lock()
-							err := b1.stream.Send(&t)
-							b1.sendMu.Unlock()
-							if err != nil {
-								logger.GrpcLog.Infoln("error forwarding msg")
-							}
-							logger.GrpcLog.Infoln("successfully forwarded msg to correct AMF")
-							found = true
-						}
-						break
-					}
-				}
-				if !found {
-					logger.GrpcLog.Infof("dropping redirected message as backend ip [%v] is not exist", response.RedirectId)
-				}
-			} else {
+			case gClient.MsgType_REDIRECT_MSG:
+				forwardRedirect(response)
+			default:
 				var ran *sctplbCtx.Ran
 				// fetch ran connection based on GnbId
 				if response.GnbId == "" {
@@ -186,6 +154,48 @@ func (b *GrpcServer) readFromServer() {
 			}
 		}
 	}
+}
+
+// forwardRedirect forwards a message that an AMF redirected to the backend
+// named by its RedirectId (see findRedirectBackend), if that backend is ready.
+func forwardRedirect(response *gClient.AmfMessage) {
+	b1 := findRedirectBackend(grpcBackends(), response.RedirectId)
+	if b1 == nil {
+		logger.GrpcLog.Infof("dropping redirected message as backend ip [%v] is not exist", response.RedirectId)
+		return
+	}
+	if !b1.state.Load() {
+		logger.GrpcLog.Infoln("backend state is not in READY state, so not forwarding redirected Msg")
+		logger.GrpcLog.Infof("dropping redirected message as backend ip [%v] is not exist", response.RedirectId)
+		return
+	}
+	t := gClient.SctplbMessage{}
+	t.VerboseMsg = "Hello From gNB Message !"
+	t.Msgtype = gClient.MsgType_GNB_MSG
+	t.SctplbId = os.Getenv("HOSTNAME")
+	t.Msg = response.Msg
+	t.GnbId = response.GnbId
+	b1.sendMu.Lock()
+	err := b1.stream.Send(&t)
+	b1.sendMu.Unlock()
+	if err != nil {
+		logger.GrpcLog.Infoln("error forwarding msg")
+	}
+	logger.GrpcLog.Infoln("successfully forwarded msg to correct AMF")
+}
+
+// grpcBackends returns a snapshot of the gRPC backends in the pool.
+func grpcBackends() []*GrpcServer {
+	sctplbSelf := sctplbCtx.Sctplb_Self()
+	sctplbSelf.Lock()
+	defer sctplbSelf.Unlock()
+	backends := make([]*GrpcServer, 0, len(sctplbSelf.Backends))
+	for _, instance := range sctplbSelf.Backends {
+		if b, ok := instance.(*GrpcServer); ok {
+			backends = append(backends, b)
+		}
+	}
+	return backends
 }
 
 func (b *GrpcServer) connectionOnState() {
