@@ -8,10 +8,17 @@ import (
 	stdctx "context"
 	"errors"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/omec-project/sctplb/config"
 	"github.com/omec-project/sctplb/context"
+)
+
+// Addresses used by the IPv4 and IPv6 discovery and gRPC target tests.
+const (
+	testIPv4Addr = "10.0.0.1"
+	testIPv6Addr = "fd00::1"
 )
 
 // fakeDiscovery replaces the resolver and the backend start for one test and
@@ -116,6 +123,85 @@ func TestDiscoverAll_ResolvesEachServiceOncePerPass(t *testing.T) {
 			grpcService("grpc", "amf", "amf-2").discoverAll(stdctx.Background())
 			if len(tc.f.names) != 2 || tc.f.names[0] != "amf" || tc.f.names[1] != "amf-2" {
 				t.Fatalf("looked up %v, want [amf amf-2]", tc.f.names)
+			}
+		})
+	}
+}
+
+// On an IPv6-only cluster the service resolves to AAAA records only. Discovery
+// used to drop every address that was not IPv4, so no backend was ever added.
+func TestDiscoverService_AddsIPv6BackendsWhenThereIsNoIPv4(t *testing.T) {
+	f := &fakeDiscovery{ips: []net.IPAddr{
+		{IP: net.ParseIP(testIPv6Addr)},
+		{IP: net.ParseIP("fd00::2")},
+	}}
+	useFakeDiscovery(t, f)
+	svc := grpcService("grpc")
+
+	svc.discoverService(stdctx.Background(), "amf")
+	if got, want := f.started, []string{testIPv6Addr, "fd00::2"}; !slices.Equal(got, want) {
+		t.Fatalf("started %v, want %v", got, want)
+	}
+
+	// A second pass finds the same addresses and adds nothing.
+	svc.discoverService(stdctx.Background(), "amf")
+	if context.Sctplb_Self().NFLength() != 2 || len(f.started) != 2 {
+		t.Fatalf("after a second pass: backends %d, started %v; want 2, 2",
+			context.Sctplb_Self().NFLength(), f.started)
+	}
+}
+
+func TestBackendAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ips  []net.IPAddr
+		want []string
+	}{
+		{
+			name: "IPv4 only",
+			ips:  []net.IPAddr{{IP: net.ParseIP(testIPv4Addr)}, {IP: net.ParseIP("10.0.0.2")}},
+			want: []string{testIPv4Addr, "10.0.0.2"},
+		},
+		{
+			name: "IPv6 only",
+			ips:  []net.IPAddr{{IP: net.ParseIP(testIPv6Addr)}, {IP: net.ParseIP("fd00::2")}},
+			want: []string{testIPv6Addr, "fd00::2"},
+		},
+		{
+			name: "dual-stack prefers IPv4",
+			ips: []net.IPAddr{
+				{IP: net.ParseIP(testIPv6Addr)},
+				{IP: net.ParseIP(testIPv4Addr)},
+				{IP: net.ParseIP("fd00::2")},
+				{IP: net.ParseIP("10.0.0.2")},
+			},
+			want: []string{testIPv4Addr, "10.0.0.2"},
+		},
+		{
+			name: "4-byte IPv4",
+			ips:  []net.IPAddr{{IP: net.IPv4(10, 0, 0, 1).To4()}},
+			want: []string{testIPv4Addr},
+		},
+		{
+			name: "IPv4-mapped IPv6 counts as IPv4",
+			ips:  []net.IPAddr{{IP: net.ParseIP("::ffff:10.0.0.1")}, {IP: net.ParseIP(testIPv6Addr)}},
+			want: []string{testIPv4Addr},
+		},
+		{
+			name: "IPv6 in canonical form",
+			ips:  []net.IPAddr{{IP: net.ParseIP("FD00:0000:0000::0001")}},
+			want: []string{testIPv6Addr},
+		},
+		{
+			name: "invalid addresses are skipped",
+			ips:  []net.IPAddr{{}, {IP: net.IP{10, 0, 0}}, {IP: net.ParseIP(testIPv6Addr)}},
+			want: []string{testIPv6Addr},
+		},
+		{name: "nothing resolved"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := backendAddresses(tc.ips); !slices.Equal(got, tc.want) {
+				t.Errorf("backendAddresses(%v) = %v, want %v", tc.ips, got, tc.want)
 			}
 		})
 	}

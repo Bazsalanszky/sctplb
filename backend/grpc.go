@@ -6,8 +6,9 @@ package backend
 
 import (
 	"context"
-	"fmt"
+	"net"
 	"os"
+	"strconv"
 
 	sctplbCtx "github.com/omec-project/sctplb/context"
 	"github.com/omec-project/sctplb/logger"
@@ -23,7 +24,7 @@ func (b *GrpcServer) ConnectToServer(ctx context.Context, port int) {
 		return
 	}
 
-	target := fmt.Sprintf("%s:%d", b.address, port)
+	target := grpcTarget(b.address, port)
 
 	logger.AppLog.Infoln("connecting to target", target)
 
@@ -103,6 +104,14 @@ func (b *GrpcServer) ConnectToServer(ctx context.Context, port int) {
 		go b.connectionOnState()
 		go b.readFromServer()
 	}
+}
+
+// grpcTarget returns the gRPC dial target for a backend address and port. An
+// IPv6 address must be in brackets: unbracketed, "fd00::1:9000" is itself a
+// valid IPv6 address, which the gRPC DNS resolver would dial on its default
+// port instead.
+func grpcTarget(address string, port int) string {
+	return net.JoinHostPort(address, strconv.Itoa(port))
 }
 
 func (b *GrpcServer) readFromServer() {
